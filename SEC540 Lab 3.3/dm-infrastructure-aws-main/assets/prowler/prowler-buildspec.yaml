@@ -1,0 +1,33 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.9
+    commands:
+      - echo "Installing Prowler and dependencies..."
+      - pip3 install -q detect-secrets
+      - curl -sJL https://github.com/prowler-cloud/prowler/archive/refs/tags/${PROWLER_VERSION}.tar.gz -o prowler.tar.gz
+      - tar xzf prowler.tar.gz
+      - mv prowler-${PROWLER_VERSION} prowler
+  build:
+    commands:
+      - export STAMP=$(date -u +"%Y-%m-%d")
+      - export LONGSTAMP=$(date -u +"%Y%m%d%H%M%S")
+      - echo "Running Prowler as ./prowler $PROWLER_OPTIONS"
+      - cd prowler
+      - mkdir -p output/
+      - ./prowler -V
+      - ./prowler $PROWLER_OPTIONS || true
+  post_build:
+    commands:
+      - echo "Uploading reports to S3..."
+      - aws s3 cp --sse AES256 output/        s3://$BUCKET_REPORT/prowler/${STAMP}/ --recursive
+      - aws s3 cp --sse AES256 junit-reports/ s3://$BUCKET_REPORT/prowler/${STAMP}/junit_${LONGSTAMP}/ --recursive
+      - echo "Done!"
+reports:
+  prowler:
+    files:
+      - "**/*"
+    base-directory: "prowler/junit-reports"
+    file-format: JunitXml

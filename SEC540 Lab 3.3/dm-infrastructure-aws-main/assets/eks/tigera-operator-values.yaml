@@ -1,0 +1,8 @@
+installation:
+  kubernetesProvider: EKS
+
+apiServer:
+  enabled: false
+
+## Commands
+# helm upgrade --install --namespace tigera-operator --create-namespace calico projectcalico/tigera-operator  --version v3.24.6 --values values.yaml
