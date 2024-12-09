@@ -1,0 +1,17 @@
+{
+    "Comment": "Creating api-alb v{TAG} record sets in Route 53",
+    "Changes": [
+        {
+            "Action": "UPSERT",
+            "ResourceRecordSet": {
+                "Name": "api.aws.dm.paper",
+                "Type": "A",
+                "AliasTarget": {
+                    "HostedZoneId": "{ALB_ZONE_ID}",
+                    "DNSName": "dualstack.{ALB_HOSTNAME}",
+                    "EvaluateTargetHealth": false
+                }
+            }
+        }
+    ]
+}
