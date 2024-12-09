@@ -1,0 +1,122 @@
+.base:
+  image: dmtools/builder_aws:stable
+  tags:
+    - docker
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  id_tokens:
+    VAULT_JWT:
+      aud: "https://vault.sans.labs"
+
+# vault env configuration
+before_script:
+  - export VAULT_TOKEN="$(vault write -field=token auth/jwt/login role=gitlab-rw-role jwt=$VAULT_JWT)"
+  - export AWS_DEFAULT_REGION=$(vault kv get -field=region kv/aws/iam/devsecops) || echo ""
+  - export AWS_ACCESS_KEY_ID=$(vault kv get -field=access_key_id kv/aws/iam/devsecops) || echo ""
+  - export AWS_SECRET_ACCESS_KEY=$(vault kv get -field=secret_access_key kv/aws/iam/devsecops) || echo ""
+  - export AWS_ACM_PRIVATE_KEY=$CI_PROJECT_DIR/.dm_acm_private_key
+  - '(vault kv get -field=private_key kv/aws/acm/www.dm.paper || echo "") >$AWS_ACM_PRIVATE_KEY'
+  - export AWS_ACM_CERTIFICATE_BODY=$CI_PROJECT_DIR/.dm_acm_certificate_body
+  - '(vault kv get -field=certificate kv/aws/acm/www.dm.paper || echo "") >$AWS_ACM_CERTIFICATE_BODY'
+  - export AWS_ACM_CERTIFICATE_CHAIN=$CI_PROJECT_DIR/.dm_acm_certificate_chain
+  - '(vault kv get -field=certificate_chain kv/aws/acm/www.dm.paper || echo "") >$AWS_ACM_CERTIFICATE_CHAIN'
+  - export AWS_EC2_DEVSECOPS_PUBLIC_KEY=$CI_PROJECT_DIR/.dm_ec2_devsecops_public_key
+  - '(vault kv get -field=public_key kv/aws/ec2/devsecops || echo "") >$AWS_EC2_DEVSECOPS_PUBLIC_KEY'
+  - export AWS_CLOUDFRONT_PUBLIC_KEY=$CI_PROJECT_DIR/.dm_cloudfront_public_key
+  - '(vault kv get -field=public_key kv/aws/cloudfront/web || echo "") >$AWS_CLOUDFRONT_PUBLIC_KEY'
+  - export AWS_CLOUDFRONT_PRIVATE_DER=$CI_PROJECT_DIR/.dm_cloudfront_private_der
+  - '(vault kv get -field=private_der kv/aws/cloudfront/web || echo "") >$AWS_CLOUDFRONT_PRIVATE_DER'
+  - export ADMIN_IP="$(curl -s https://checkip.amazonaws.com)/32"
+  - export DISCORD_WEBHOOK=$(vault kv get -field=webhook kv/dm/webhooks/discord) || echo ""
+  - export JWT_SECRET=$(vault kv get -field=jwt-secret kv/dm/tokens/api) || echo ""
+  - "/bin/bash ./build/bin/random-deployment-id.sh"
+  - export DEPLOYMENT_ID=$(cat .dm_random)
+
+stages:
+  - initialize
+  - test
+  - deploy
+  - post-deploy
+
+check-tools:
+  stage: initialize
+  extends: .base
+  script:
+    - "aws --version"
+    - "jq --version"
+    - "terraform --version"
+
+check-credentials:
+  stage: initialize
+  extends: .base
+  needs:
+    - check-tools
+  script:
+    - "/bin/bash ./build/bin/aws-vault-verification.sh"
+    - "/bin/bash ./build/bin/aws-check-quota.sh"
+
+checkov:
+  image: dmtools/builder_checkov:stable
+  stage: test
+  extends: .base
+  variables:
+    RESULTS_DIR: ./tests/checkov
+    SARIF_RESULTS: results_sarif.sarif
+    JUNIT_RESULTS: results_junitxml.xml
+  script:
+    - "/bin/bash ./build/bin/checkov-scan.sh $RESULTS_DIR $SARIF_RESULTS $JUNIT_RESULTS"
+  artifacts:
+    when: always
+    paths:
+      - $RESULTS_DIR/*
+    reports:
+      junit: $RESULTS_DIR/$JUNIT_RESULTS
+
+audit-tools:
+  stage: deploy
+  extends: .base
+  script:
+    - "/bin/bash ./build/bin/dm-audit-tools.sh $AWS_DEFAULT_REGION"
+
+terraform:
+  stage: deploy
+  extends: .base
+  needs:
+    - audit-tools
+  script:
+    - "/bin/bash ./build/bin/tfstate_s3.sh $AWS_DEFAULT_REGION $DEPLOYMENT_ID"
+    - "/bin/bash ./build/bin/tf_deploy.sh
+      $(cat .dm_tf_state_bucket)
+      $DEPLOYMENT_ID
+      $AWS_DEFAULT_REGION
+      $ADMIN_IP
+      $AWS_EC2_DEVSECOPS_PUBLIC_KEY
+      $AWS_ACM_PRIVATE_KEY
+      $AWS_ACM_CERTIFICATE_BODY
+      $AWS_ACM_CERTIFICATE_CHAIN
+      $DISCORD_WEBHOOK
+      $AWS_CLOUDFRONT_PUBLIC_KEY
+      $AWS_CLOUDFRONT_PRIVATE_DER
+      $JWT_SECRET
+      "
+    - "/bin/bash ./assets/k8s-all/install-cert-manager.sh"
+    - "/bin/bash ./assets/k8s-all/install-cosign.sh"
+    - "/bin/bash ./assets/k8s-all/install-opa-gatekeeper.sh"
+    - "/bin/bash ./assets/eks/install-metrics-server.sh"
+    - "/bin/bash ./assets/eks/install-aws-alb-controller.sh"
+    - "/bin/bash ./assets/eks/install-eks-container-insights.sh"
+    - "/bin/bash ./assets/eks/install-tigera-operator.sh"
+    - "/bin/bash ./assets/policy/install-policies.sh"
+
+prowler:
+  stage: post-deploy
+  extends: .base
+  script:
+    - "/bin/bash ./build/bin/run_prowler.sh"
+
+custodian:
+  image: dmtools/builder_custodian:stable
+  stage: post-deploy
+  extends: .base
+  script:
+    - 'echo "LAB53: Install custodian policies"'
