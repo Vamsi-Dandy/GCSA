@@ -1,0 +1,220 @@
+.host:
+  tags:
+    - host
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  id_tokens:
+    VAULT_JWT:
+      aud: "https://vault.sans.labs"
+
+.base:
+  image: dmtools/builder_base:stable
+  tags:
+    - docker
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  id_tokens:
+    VAULT_JWT:
+      aud: "https://vault.sans.labs"
+
+# vault env configuration
+before_script:
+  - export VAULT_TOKEN="$(vault write -field=token auth/jwt/login role=gitlab-rw-role jwt=$VAULT_JWT)"
+  - export AWS_ACTIVE=$(vault kv get -field=aws_active kv/aws/deployment/status) || echo ""
+  - export AZ_ACTIVE=$(vault kv get -field=azure_active kv/az/deployment/status) || echo ""
+
+stages:
+  - initialize
+  - test
+  - build
+  - scan
+  - package
+  - deploy
+
+check-tools-aws:
+  image: dmtools/builder_aws:stable
+  stage: initialize
+  extends: .base
+  script:
+    - "aws --version"
+    - "jq --version"
+    - "terraform --version"
+    - "kubectl version --client --output=yaml"
+
+check-tools-az:
+  image: dmtools/builder_az:stable
+  stage: initialize
+  extends: .base
+  script:
+    - "az --version"
+    - "az aks --help"
+    - "jq --version"
+    - "terraform --version"
+    - "kubectl version --client --output=yaml"
+
+semgrep:
+  image: dmtools/builder_base:stable
+  stage: test
+  extends: .base
+  variables:
+    RESULTS_DIR: ./tests/semgrep
+    SARIF_RESULTS: results.sarif
+    JUNIT_RESULTS: results.junit.xml
+  script:
+    - 'echo "LAB13: Implement semgrep scan and process results"'
+
+dependency-check:
+  image: dmtools/builder_base:stable
+  stage: test
+  extends: .base
+  variables:
+    RESULTS_DIR: ./tests/odc
+    SARIF_RESULTS: results.sarif
+    JUNIT_RESULTS: results.junit.xml
+  script:
+    - 'echo "BONUS: Implement odc scan and process results"'
+
+trivy-fs:
+  image: dmtools/builder_trivy:stable
+  stage: test
+  extends: .base
+  variables:
+    RESULTS_DIR: ./tests/trivy-fs
+    SARIF_RESULTS: results.sarif
+    JUNIT_RESULTS: results.junit.xml
+  script:
+    - "/bin/bash ./build/bin/trivy-fs-scan.sh $RESULTS_DIR $SARIF_RESULTS $JUNIT_RESULTS"
+  artifacts:
+    when: always
+    paths:
+      - $RESULTS_DIR/*
+    reports:
+      junit: $RESULTS_DIR/$JUNIT_RESULTS
+
+build-aws:
+  stage: build
+  extends: .host
+  script:
+    - "/bin/bash ./build/bin/build-aws.sh"
+
+trivy-scan-aws:
+  image: dmtools/builder_trivy:stable
+  stage: scan
+  extends: .base
+  needs:
+    - build-aws
+  variables:
+    RESULTS_DIR: ./tests/trivy-scan-aws
+    SARIF_RESULTS: results.sarif
+    JUNIT_RESULTS: results.junit.xml
+    VAULT_DATA: kv/aws/ecr/api
+  script:
+    - "/bin/bash ./build/bin/trivy-image-scan.sh $RESULTS_DIR $SARIF_RESULTS $JUNIT_RESULTS $VAULT_DATA"
+  artifacts:
+    when: always
+    paths:
+      - $RESULTS_DIR/*
+    reports:
+      junit: $RESULTS_DIR/$JUNIT_RESULTS
+
+sign-image-aws:
+  stage: package
+  extends: .host
+  needs:
+    - trivy-scan-aws
+  script:
+    - 'echo "LAB24: Implement cosign"'
+    - "/bin/bash ./build/bin/cosign-aws.sh"
+
+sbom-aws:
+  stage: package
+  extends: .host
+  needs:
+    - trivy-scan-aws
+  variables:
+    RESULTS_DIR: ./sboms
+    CYCLONEDX_SBOM: sbom.cyclonedx.json
+    SPDX_SBOM: sbom.spdx.json
+    SYFT_SBOM: sbom.syft.json
+  script:
+    - 'echo "LAB24: Implement SBOM"'
+    - "/bin/bash ./build/bin/sbom-aws.sh"
+  artifacts:
+    when: always
+    paths:
+      - $RESULTS_DIR/*
+    reports:
+      cyclonedx: $RESULTS_DIR/$CYCLONEDX_SBOM
+
+deploy-aws:
+  image: dmtools/builder_aws:stable
+  stage: deploy
+  extends: .base
+  needs:
+    - sign-image-aws
+    - sbom-aws
+  script:
+    - "/bin/bash ./build/bin/deploy-aws.sh"
+
+build-az:
+  stage: build
+  extends: .host
+  script:
+    - "/bin/bash ./build/bin/build-az.sh"
+
+trivy-scan-az:
+  image: dmtools/builder_trivy:stable
+  stage: scan
+  extends: .base
+  needs:
+    - build-az
+  variables:
+    RESULTS_DIR: ./tests/trivy-scan-az
+    SARIF_RESULTS: results.sarif
+    JUNIT_RESULTS: results.junit.xml
+    VAULT_DATA: kv/az/acr/api
+  script:
+    - 'echo "LAB23: Implement trivy scan"'
+  artifacts:
+    when: always
+    paths:
+      - $RESULTS_DIR/*
+    reports:
+      junit: $RESULTS_DIR/$JUNIT_RESULTS
+
+sign-image-az:
+  stage: package
+  extends: .host
+  needs:
+    - trivy-scan-az
+  script:
+    - 'echo "LAB24: Implement cosign"'
+
+sbom-az:
+  stage: package
+  extends: .host
+  needs:
+    - trivy-scan-az
+  variables:
+    RESULTS_DIR: ./sboms
+    CYCLONEDX_SBOM: sbom.cyclonedx.json
+    SPDX_SBOM: sbom.spdx.json
+    SYFT_SBOM: sbom.syft.json
+  script:
+    - 'echo "LAB24: Implement SBOM"'
+  artifacts:
+    when: always
+    paths:
+      - $RESULTS_DIR/*
+    reports:
+      cyclonedx: $RESULTS_DIR/$CYCLONEDX_SBOM
+
+deploy-az:
+  image: dmtools/builder_az:stable
+  stage: deploy
+  extends: .base
+  needs:
+    - sign-image-az
+    - sbom-az
+  script:
+    - "/bin/bash ./build/bin/deploy-az.sh"
