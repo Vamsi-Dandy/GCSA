@@ -1,0 +1,88 @@
+.host:
+  tags:
+    - host
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH == "hotfix"
+  id_tokens:
+    VAULT_JWT:
+      aud: "https://vault.sans.labs"
+
+.base:
+  image: dmtools/builder_base:stable
+  tags:
+    - docker
+  variables:
+    DEPLOYMENT_FILE: "deployment.yml"
+    SERVICE_FILE: "service.yml"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH == "hotfix"
+      variables:
+        DEPLOYMENT_FILE: "deployment-green.yml"
+        SERVICE_FILE: "service-green.yml"
+  id_tokens:
+    VAULT_JWT:
+      aud: "https://vault.sans.labs"
+
+# vault env configuration
+before_script:
+  - export VAULT_TOKEN="$(vault write -field=token auth/jwt/login role=gitlab-rw-role jwt=$VAULT_JWT)"
+  - export AWS_ACTIVE=$(vault kv get -field=aws_active kv/aws/deployment/status) || echo ""
+  - export AZ_ACTIVE=$(vault kv get -field=azure_active kv/az/deployment/status) || echo ""
+
+stages:
+  - initialize
+  - build
+  - deploy
+
+check-tools-aws:
+  image: dmtools/builder_aws:stable
+  stage: initialize
+  extends: .base
+  script:
+    - "aws --version"
+    - "jq --version"
+    - "terraform --version"
+    - "kubectl version --client --output=yaml"
+
+check-tools-az:
+  image: dmtools/builder_az:stable
+  stage: initialize
+  extends: .base
+  script:
+    - "az --version"
+    - "az aks --help"
+    - "jq --version"
+    - "terraform --version"
+    - "kubectl version --client --output=yaml"
+
+build-aws:
+  stage: build
+  extends: .host
+  script:
+    - "/bin/bash ./build/bin/build-aws.sh"
+
+deploy-aws:
+  image: dmtools/builder_aws:stable
+  stage: deploy
+  extends: .base
+  needs:
+    - build-aws
+  script:
+    - "/bin/bash ./build/bin/deploy-aws.sh $DEPLOYMENT_FILE $SERVICE_FILE"
+
+build-az:
+  stage: build
+  extends: .host
+  script:
+    - "/bin/bash ./build/bin/build-az.sh"
+
+deploy-az:
+  image: dmtools/builder_az:stable
+  stage: deploy
+  extends: .base
+  needs:
+    - build-az
+  script:
+    - "/bin/bash ./build/bin/deploy-az.sh $DEPLOYMENT_FILE $SERVICE_FILE"

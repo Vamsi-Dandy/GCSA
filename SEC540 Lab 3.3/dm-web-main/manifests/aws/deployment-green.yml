@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-green
+  namespace: dm
+  labels:
+    app: web-green
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web-green
+  template:
+    metadata:
+      name: web-green
+      labels:
+        app: web-green
+    spec:
+      serviceAccountName: "web-sa"
+      containers:
+        - name: web-green
+          image: "{IMAGE_NAME}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8443
+      nodeSelector:
+        kubernetes.io/os: linux

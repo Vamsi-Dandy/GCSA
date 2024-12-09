@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: dm
+  labels:
+    app: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      name: web
+      labels:
+        app: web
+    spec:
+      containers:
+        - name: web
+          image: "{IMAGE_NAME}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: AZURE_CLIENT_ID
+              value: "{AZURE_CLIENT_ID}"
+            - name: AZURE_CLIENT_SECRET
+              value: "{AZURE_CLIENT_SECRET}"
+            - name: AZURE_TENANT_ID
+              value: "{AZURE_TENANT_ID}"
+      nodeSelector:
+        kubernetes.io/os: linux
